@@ -16,11 +16,114 @@ typedef uint16_t u16;
 typedef uint8_t u8;
 
 namespace Lz4pj {
+
+  const u32 MIN_MATCH_OFFSET = 1;
   
+  const u32 NO_MAX_MATCH_LEN = 0;
+  const u32 NO_MAX_MATCH_OFFSET = 0;
+  
+  const u32 MIN_MAIN_PASS_MATCH_LEN = 4;
+  const u32 MAX_MAIN_PASS_MATCH_LEN = NO_MAX_MATCH_LEN;
+  const u32 MAX_MAIN_PASS_MATCH_OFFSET = NO_MAX_MATCH_OFFSET;
+
+  const u32 MIN_3BYTE_PASS_MATCH_LEN = 3;
+  const u32 MAX_3BYTE_PASS_MATCH_LEN = 3;
+  const u32 MAX_3BYTE_PASS_MATCH_OFFSET = 256;
+  
+  const u32 MIN_2BYTE_PASS_MATCH_LEN = 2;
+  const u32 MAX_2BYTE_PASS_MATCH_LEN = 2;
+  const u32 MAX_2BYTE_PASS_MATCH_OFFSET = 256;
+  
+  template <u32 MAX_MATCH_OFFSET>
+  struct out_buf {
+    u8* buf;
+    u32 index;
+    
+    out_buf(u8* buf, u32 index): buf(buf), index(0) {}
+    
+    void out(u8 byte) {
+      buf[index++] = byte;
+    }
+    
+    void write_bytes(u8* bytes, u32 n_bytes) {
+      memcpy(&buf[index], bytes, (size_t)n_bytes);
+      index += n_bytes;
+    }
+    
+    void write_utf8_len(u32 len) {
+      if(len == 0) {
+	out(0);
+      }
+      while(len) {
+	u8 hibit = len < 128 ? 0 : 0x80;
+	out((u8)(len & 0x7f) | hibit);
+	len = len >> 7;
+      }
+    }
+    
+    void write_long_len(u32 len) {
+      if(len >= 15) {
+	len -= 15;
+	
+	if(len < 255) {
+	  out(len);
+	} else {
+	  out(255);
+	  len -= 255;
+	  if(len < 255 * 256) {
+	    out((u8)(len >> 8));
+	    out((u8)len);
+	  } else {
+	    out(255);
+	    out((u8)(len >> 24));
+	    out((u8)(len >> 16));
+	    out((u8)(len >> 8));
+	    out((u8)len);
+	  }
+	}
+      }
+    }
+    
+    void write_len_pair(u32 len1, u32 len2, u32 min_len) {
+      len1 -= min_len;
+      u8 nibble1 = len1 < 15 ? len1 : 15;
+      len2 -= min_len;
+      u8 nibble2 = len2 < 15 ? len2 : 15;
+      
+      u8 nibble_pair = (nibble1 << 4) | nibble2;
+      out(nibble_pair);
+      
+      write_long_len(len1);
+      write_long_len(len2);
+    }
+    
+    void write_lens(u32* lens, u32 n_lens, u32 min_len) {
+      for(u32 i = 0; i < n_lens-1; i += 2) {
+	write_len_pair(lens[i], lens[i+1], min_len);
+      }
+      if(n_lens & 1) {
+	write_len_pair(lens[n_lens-1], 0, min_len);
+      }
+    }
+    
+    void write_match_offset(u32 offset) {
+      if(MAX_MATCH_OFFSET - MIN_MATCH_OFFSET < 256) {
+	out((u8)offset);
+      } else {
+	write_utf8_len(offset - MIN_MATCH_OFFSET);
+      }
+    }
+    
+    void write_match_offsets(u32* offsets, u32 n_offsets) {
+      for(u32 i = 0; i < n_offsets; i++) {
+	write_match_offset(offsets[i]);
+      }
+    }
+  };
+
+  template <u32 MIN_MATCH_LEN, u32 MAX_MATCH_LEN, u32 MAX_MATCH_OFFSET>
   struct Lz4pjCState {
     static const u8 VERSION = 0;
-    static const u32 MIN_MATCH_LEN = 4;
-    static const u32 MIN_MATCH_OFFSET = 1;
     
     u32* last_bytepair_indexes;
 
@@ -74,7 +177,7 @@ namespace Lz4pj {
       if(index <= match_index) { return 0; }
       
       u32 start_index = index;
-      while(index < raw_len && raw[index] == raw[match_index]) {
+      while(index < raw_len && (MAX_MATCH_LEN == NO_MAX_MATCH_LEN || index < start_index + MAX_MATCH_LEN) && raw[index] == raw[match_index]) {
 	index++; match_index++;
       }
       return index - start_index;
@@ -133,94 +236,12 @@ namespace Lz4pj {
       }
     }
 
-    struct out_buf {
-      u8* buf;
-      u32 index;
-
-      out_buf(u8* buf, u32 index): buf(buf), index(0) {}
-
-      void out(u8 byte) {
-	buf[index++] = byte;
-      }
-
-      void write_bytes(u8* bytes, u32 n_bytes) {
-	memcpy(&buf[index], bytes, (size_t)n_bytes);
-	index += n_bytes;
-      }
-
-      void write_utf8_len(u32 len) {
-	if(len == 0) {
-	  out(0);
-	}
-	while(len) {
-	  u8 hibit = len < 128 ? 0 : 0x80;
-	  out((u8)(len & 0x7f) | hibit);
-	  len = len >> 7;
-	}
-      }
-      
-      void write_long_len(u32 len) {
-	if(len >= 15) {
-	  len -= 15;
-
-	  if(len < 255) {
-	    out(len);
-	  } else {
-	    out(255);
-	    len -= 255;
-	    if(len < 255 * 256) {
-	      out((u8)(len >> 8));
-	      out((u8)len);
-	    } else {
-	      out(255);
-	      out((u8)(len >> 24));
-	      out((u8)(len >> 16));
-	      out((u8)(len >> 8));
-	      out((u8)len);
-	    }
-	  }
-	}
-      }
-      
-      void write_len_pair(u32 len1, u32 len2, u32 min_len) {
-	len1 -= min_len;
-	u8 nibble1 = len1 < 15 ? len1 : 15;
-	len2 -= min_len;
-	u8 nibble2 = len2 < 15 ? len2 : 15;
-
-	u8 nibble_pair = (nibble1 << 4) | nibble2;
-	out(nibble_pair);
-
-	write_long_len(len1);
-	write_long_len(len2);
-      }
-      
-      void write_lens(u32* lens, u32 n_lens, u32 min_len) {
-	for(u32 i = 0; i < n_lens-1; i += 2) {
-	  write_len_pair(lens[i], lens[i+1], min_len);
-	}
-	if(n_lens & 1) {
-	  write_len_pair(lens[n_lens-1], 0, min_len);
-	}
-      }
-
-      void write_match_offset(u32 offset) {
-	write_utf8_len(offset - MIN_MATCH_OFFSET);
-      }
-      
-      void write_match_offsets(u32* offsets, u32 n_offsets) {
-	for(u32 i = 0; i < n_offsets; i++) {
-	  write_match_offset(offsets[i]);
-	}
-      }
-    };
-
     // @return size
 
     u32 write_compressed(void* compressed_void, u32 compressed_len) {
       printf("%u chunks, %u lits, %u trailing-lits\n", n_chunks, n_lits, trailing_lit_len);
 
-      out_buf out((u8*)compressed_void, compressed_len);
+      out_buf<MAX_MATCH_OFFSET> out((u8*)compressed_void, compressed_len);
 
       // Header
       out.out(VERSION);
@@ -236,8 +257,10 @@ namespace Lz4pj {
 
       out.write_lens(lit_lens, n_chunks, 0/*min lit-len*/);
       printf("After lit lens - compressed len is %u\n", out.index);
-      out.write_lens(match_lens, n_chunks, MIN_MATCH_LEN);
-      printf("After match lens - compressed len is %u\n", out.index);
+      if(MIN_MATCH_LEN != MAX_MATCH_LEN) {
+	out.write_lens(match_lens, n_chunks, MIN_MATCH_LEN);
+	printf("After match lens - compressed len is %u\n", out.index);
+      }
 
       out.write_match_offsets(match_offsets, n_chunks);
       printf("After match offsets - compressed len is %u\n", out.index);
@@ -248,27 +271,48 @@ namespace Lz4pj {
       return out.index;
     }
 
+    // size_t compress(const void* raw, size_t raw_len, void* compressed, size_t compressed_len) {
+    //   init(raw_len);
 
-    size_t compress(const void* raw, size_t raw_len, void* compressed, size_t compressed_len) {
-      init(raw_len);
+    //   generate_chunks(raw, (u32)raw_len);
 
-      generate_chunks(raw, (u32)raw_len);
+    //   size_t len = (size_t) write_compressed(compressed, (u32)compressed_len);
 
-      size_t len = (size_t) write_compressed(compressed, (u32)compressed_len);
+    //   cleanup();
 
-      cleanup();
-
-      return len;
-    }
+    //   return len;
+    // }
   };
 
 } // namespace Lz4pj
 
 // @return 0 iff failed to compress, otherwise compressed len
 size_t lz4pj_compress(const void* raw, size_t raw_len, void* compressed, size_t compressed_len) {
-  Lz4pj::Lz4pjCState cstate;
+  Lz4pj::Lz4pjCState<Lz4pj::MIN_MAIN_PASS_MATCH_LEN, Lz4pj::MAX_MAIN_PASS_MATCH_LEN, Lz4pj::MAX_MAIN_PASS_MATCH_OFFSET> cstate_main;
 
-  return compressed_len = cstate.compress(raw, raw_len, compressed, compressed_len);
+  cstate_main.init(raw_len);
+  cstate_main.generate_chunks(raw, (u32)raw_len);
+  
+  Lz4pj::Lz4pjCState<Lz4pj::MIN_3BYTE_PASS_MATCH_LEN, Lz4pj::MAX_3BYTE_PASS_MATCH_LEN, Lz4pj::MAX_3BYTE_PASS_MATCH_OFFSET> cstate_3byte;
+  cstate_3byte.init(cstate_main.n_lits);
+  cstate_3byte.generate_chunks(cstate_main.lits, cstate_main.n_lits);
+
+  size_t len_3byte = (size_t) cstate_3byte.write_compressed(compressed, (u32)compressed_len);
+  cstate_3byte.cleanup();
+  printf("3byte compressed len %lu\n", len_3byte);
+  
+  Lz4pj::Lz4pjCState<Lz4pj::MIN_2BYTE_PASS_MATCH_LEN, Lz4pj::MAX_2BYTE_PASS_MATCH_LEN, Lz4pj::MAX_2BYTE_PASS_MATCH_OFFSET> cstate_2byte;
+  cstate_2byte.init(cstate_main.n_lits*2);
+  cstate_2byte.generate_chunks(cstate_main.lits, cstate_main.n_lits);
+
+  size_t len_2byte = (size_t) cstate_2byte.write_compressed(compressed, (u32)compressed_len);
+  cstate_2byte.cleanup();
+  printf("2byte compressed len %lu\n", len_2byte);
+  
+  size_t len = (size_t) cstate_main.write_compressed(compressed, (u32)compressed_len);
+  cstate_main.cleanup();
+
+  return len;
 }
 
 static std::string slurp(const std::string& filepath) {
@@ -321,7 +365,7 @@ int main(int argc, char* argv[]) {
   out_fs << std::string((char*)compressed, len);
   out_fs.close();
 
-  printf("Input %s %lu bytes -> output %s %lu bytes in %.3lf secs %.3lf MB/s\n", raw_file, raw_len, compressed_file, len, secs, (double)raw_len/secs/(1024*1024));
+  printf("Input %s %lu bytes -> output %s %lu bytes in %.3lf ms %.3lf MB/s\n", raw_file, raw_len, compressed_file, len, secs*1000, (double)raw_len/secs/(1024*1024));
   
   delete[] compressed;
 }
