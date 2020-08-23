@@ -238,8 +238,8 @@ namespace Lz4pj {
 
     // @return size
 
-    u32 write_compressed(void* compressed_void, u32 compressed_len) {
-      printf("%u chunks, %u lits, %u trailing-lits\n", n_chunks, n_lits, trailing_lit_len);
+    u32 write_compressed(void* compressed_void, u32 compressed_len, bool write_lits = true) {
+      //printf("%u chunks, %u lits, %u trailing-lits\n", n_chunks, n_lits, trailing_lit_len);
 
       out_buf<MAX_MATCH_OFFSET> out((u8*)compressed_void, compressed_len);
 
@@ -247,26 +247,30 @@ namespace Lz4pj {
       out.out(VERSION);
 
       // Lit bytes
-      out.write_utf8_len(n_lits);
-      out.write_bytes(lits, n_lits);
+      if(write_lits) {
+	out.write_utf8_len(n_lits);
+	out.write_bytes(lits, n_lits);
+      }
 
-      printf("After lits - compressed len is %u\n", out.index);
+      //printf("After lits - compressed len is %u\n", out.index);
 
       // Chunks
       out.write_utf8_len(n_chunks);
 
       out.write_lens(lit_lens, n_chunks, 0/*min lit-len*/);
-      printf("After lit lens - compressed len is %u\n", out.index);
+      //printf("After lit lens - compressed len is %u\n", out.index);
       if(MIN_MATCH_LEN != MAX_MATCH_LEN) {
 	out.write_lens(match_lens, n_chunks, MIN_MATCH_LEN);
-	printf("After match lens - compressed len is %u\n", out.index);
+	//printf("After match lens - compressed len is %u\n", out.index);
       }
 
       out.write_match_offsets(match_offsets, n_chunks);
-      printf("After match offsets - compressed len is %u\n", out.index);
+      //printf("After match offsets - compressed len is %u\n", out.index);
 
       // Trailing lits
       out.write_utf8_len(trailing_lit_len);
+
+      //printf("After trailing lits - compressed len is %u\n\n", out.index);
       
       return out.index;
     }
@@ -294,25 +298,26 @@ size_t lz4pj_compress(const void* raw, size_t raw_len, void* compressed, size_t 
   cstate_main.generate_chunks(raw, (u32)raw_len);
   
   Lz4pj::Lz4pjCState<Lz4pj::MIN_3BYTE_PASS_MATCH_LEN, Lz4pj::MAX_3BYTE_PASS_MATCH_LEN, Lz4pj::MAX_3BYTE_PASS_MATCH_OFFSET> cstate_3byte;
-  cstate_3byte.init(cstate_main.n_lits);
+  cstate_3byte.init(cstate_main.n_lits*2);
   cstate_3byte.generate_chunks(cstate_main.lits, cstate_main.n_lits);
 
-  size_t len_3byte = (size_t) cstate_3byte.write_compressed(compressed, (u32)compressed_len);
-  cstate_3byte.cleanup();
-  printf("3byte compressed len %lu\n", len_3byte);
+  // size_t len_3byte = (size_t) cstate_3byte.write_compressed(compressed, (u32)compressed_len);
+  //printf("3byte lits compressed len %lu\n\n", len_3byte);
   
   Lz4pj::Lz4pjCState<Lz4pj::MIN_2BYTE_PASS_MATCH_LEN, Lz4pj::MAX_2BYTE_PASS_MATCH_LEN, Lz4pj::MAX_2BYTE_PASS_MATCH_OFFSET> cstate_2byte;
-  cstate_2byte.init(cstate_main.n_lits*2);
-  cstate_2byte.generate_chunks(cstate_main.lits, cstate_main.n_lits);
+  cstate_2byte.init(cstate_3byte.n_lits*2);
+  cstate_2byte.generate_chunks(cstate_3byte.lits, cstate_3byte.n_lits);
 
   size_t len_2byte = (size_t) cstate_2byte.write_compressed(compressed, (u32)compressed_len);
   cstate_2byte.cleanup();
-  printf("2byte compressed len %lu\n", len_2byte);
+  //printf("2byte lits compressed len %lu\n\n", len_2byte);
+
+  cstate_3byte.cleanup();
   
-  size_t len = (size_t) cstate_main.write_compressed(compressed, (u32)compressed_len);
+  size_t len = (size_t) cstate_main.write_compressed((u8*)compressed+len_2byte, (u32)compressed_len-len_2byte, false/*no-lits*/);
   cstate_main.cleanup();
 
-  return len;
+  return len_2byte + len;
 }
 
 static std::string slurp(const std::string& filepath) {
@@ -345,15 +350,19 @@ int main(int argc, char* argv[]) {
   typedef std::chrono::duration<double> dsec;
   
   auto t0 = Time::now();
-  
+
   size_t compressed_len = 2*raw_len; // worst case
   u8* compressed = new u8[compressed_len];
-
-  size_t len = lz4pj_compress(raw, raw_len, compressed, compressed_len);
-
-  if(len == 0) {
-    fprintf(stderr, "Error compressing\n");
-    exit(1);
+  
+  const int n_loops = 265;
+  size_t len;
+  for(int n = 0; n < n_loops; n++) {
+    len = lz4pj_compress(raw, raw_len, compressed, compressed_len);
+    
+    if(len == 0) {
+      fprintf(stderr, "Error compressing\n");
+      exit(1);
+    }
   }
 
   auto t1 = Time::now();
@@ -365,7 +374,7 @@ int main(int argc, char* argv[]) {
   out_fs << std::string((char*)compressed, len);
   out_fs.close();
 
-  printf("Input %s %lu bytes -> output %s %lu bytes in %.3lf ms %.3lf MB/s\n", raw_file, raw_len, compressed_file, len, secs*1000, (double)raw_len/secs/(1024*1024));
+  printf("Input %s %lu bytes -> output %s %lu bytes in %.3lf ms %.3lf MB/s\n", raw_file, raw_len, compressed_file, len, secs*1000, (double)raw_len*n_loops/secs/(1024*1024));
   
   delete[] compressed;
 }
